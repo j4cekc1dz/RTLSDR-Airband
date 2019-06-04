@@ -68,6 +68,7 @@
 #define MP3_RATE 8000
 #define MAX_SHOUT_QUEUELEN 32768
 #define TAG_QUEUE_LEN 16
+#define SHORTNAME_LENGTH 7
 #define MAX_MIXINPUTS 32
 
 #define MIN_FFT_SIZE_LOG 8
@@ -234,6 +235,8 @@ struct mixinput_t {
 	float ampfactor;
 	float ampl, ampr;
 	bool ready;
+	bool priority;
+	char shortname[SHORTNAME_LENGTH + 1];
 	pthread_mutex_t mutex;
 };
 
@@ -294,7 +297,7 @@ extern FILE *debugf;
 
 // mixer.cpp
 mixer_t *getmixerbyname(const char *name);
-int mixer_connect_input(mixer_t *mixer, float ampfactor, float balance);
+int mixer_connect_input(mixer_t *mixer, float ampfactor, float balance, char *label, bool priority);
 void mixer_disable_input(mixer_t *mixer, int input_idx);
 void mixer_put_samples(mixer_t *mixer, int input_idx, float *samples, unsigned int len);
 void *mixer_thread(void *params);

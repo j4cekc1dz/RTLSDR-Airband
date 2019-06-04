@@ -102,11 +102,16 @@ static int parse_outputs(libconfig::Setting &outs, channel_t *channel, int i, in
 				cerr<<"Configuration error: devices.["<<i<<"] channels.["<<j<<"] outputs["<<o<<"]: balance out of allowed range <-1.0;1.0>\n";
 				error();
 			}
-			if((mdata->input = mixer_connect_input(mdata->mixer, ampfactor, balance)) < 0) {
+			bool priority = outs[o].exists("priority") ?
+				(bool)(outs[o]["priority"]) : false;
+			char *shortname = strndup(outs[o].exists("shortname") ? outs[o]["name"] : "??????", 6);
+			if((mdata->input = mixer_connect_input(mdata->mixer, ampfactor, balance, shortname, priority)) < 0) {
+				free(shortname);
 				cerr<<"Configuration error: devices.["<<i<<"] channels.["<<j<<"] outputs["<<o<<"]: "\
 					"could not connect to mixer "<<name<<": "<<mixer_get_error()<<"\n";
 					error();
 			}
+			free(shortname);
 			debug_print("dev[%d].chan[%d].out[%d] connected to mixer %s as input %d (ampfactor=%.1f balance=%.1f)\n",
 				i, j, o, name, mdata->input, ampfactor, balance);
 #ifdef PULSE

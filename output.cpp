@@ -413,7 +413,7 @@ void* output_thread(void* params) {
 			if(mixers[i].enabled == false) continue;
 			channel_t *channel = &mixers[i].channel;
 			if(channel->state == CH_READY) {
-				process_outputs(channel, -1);
+				process_outputs(channel, 100);
 				channel->state = CH_DIRTY;
 			}
 		}

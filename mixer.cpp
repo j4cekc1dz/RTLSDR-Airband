@@ -28,6 +28,8 @@
 #include "rtl_airband.h"
 
 static char *err;
+static freq_t dummy_freqlist[1];
+static char label[32];
 
 static inline void mixer_set_error(const char *msg) {
 	err = strdup(msg);
@@ -53,7 +55,7 @@ void mixer_disable(mixer_t *mixer) {
 	disable_channel_outputs(&mixer->channel);
 }
 
-int mixer_connect_input(mixer_t *mixer, float ampfactor, float balance) {
+int mixer_connect_input(mixer_t *mixer, float ampfactor, float balance, char *shortname, bool priority) {
 	if(!mixer) {
 		mixer_set_error("mixer is undefined");
 		return(-1);
@@ -74,6 +76,9 @@ int mixer_connect_input(mixer_t *mixer, float ampfactor, float balance) {
 	if(balance != 0.0f)
 		mixer->channel.mode = MM_STEREO;
 	mixer->inputs[i].ready = false;
+	strncpy(mixer->inputs[i].shortname, shortname, SHORTNAME_LENGTH - 1);
+	mixer->inputs[i].shortname[SHORTNAME_LENGTH] = '\0';
+	mixer->inputs[i].priority = priority;
 	SET_BIT(mixer->input_mask, i);
 	SET_BIT(mixer->inputs_todo, i);
 	mixer->enabled = true;
@@ -104,21 +109,33 @@ void mixer_put_samples(mixer_t *mixer, int input_idx, float *samples, unsigned i
 	pthread_mutex_unlock(&input->mutex);
 }
 
-static bool mix_waveforms(float *sum, float *in, float mult, int size) {
-	if(mult == 0.0f) return false;
-	bool squelch_open = false;
+static inline bool is_input_active(float *in, int size) {
+	for(int s = 0; s < size; s++) {
+		if(in[s] != 0.0f) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static void mix_waveforms(float *sum, float *in, float mult, int size) {
+	if(mult == 0.0f) return;
 	for(int s = 0; s < size; s++) {
 		sum[s] += in[s] * mult;
 	}
-	for(int s = 0; s < size; s++) {
-		if(in[s] != 0.0f) {
-			squelch_open = true;
-			break;
-		}
-	}
-	return squelch_open;
 }
 
+static void mix_shortnames(char *sum, char *shortname)
+{
+	if(sum == NULL || shortname == NULL) return;
+
+	int remaining = 31 - strlen(sum);
+	if(remaining > 3) {
+		strncat(sum, shortname, remaining - 1);
+		strncat(sum, " ", 1);
+	}
+}
 /* Samples are delivered to mixer inputs in batches of WAVE_BATCH size (default 1000, ie. 1/8 secs
  * of audio). mixer_thread emits mixed audio in batches of the same size, but the loop runs
  * twice more often (MIX_DIVISOR = 2) in order to accomodate for any possible input jitter
@@ -135,6 +152,8 @@ static bool mix_waveforms(float *sum, float *in, float mult, int size) {
  *       here we must emit the mixed audio to keep the desired audio bitrate.
  */
 void *mixer_thread(void *params) {
+	dummy_freqlist[0].label = label;
+	mixers[0].channel.freqlist = dummy_freqlist;
 	struct timeval ts, te;
 	int interval_usec = 1e+6 * WAVE_BATCH / WAVE_RATE / MIX_DIVISOR;
 	if(mixer_count <= 0) return 0;
@@ -147,6 +166,7 @@ void *mixer_thread(void *params) {
 			if(mixer->enabled == false) continue;
 			channel_t *channel = &mixer->channel;
 
+			bool only_priority_output = false;
 			if(channel->state == CH_READY) {		// previous output not yet handled by output thread
 				if(--mixer->interval > 0) {
 					continue;
@@ -167,13 +187,29 @@ void *mixer_thread(void *params) {
 						channel->state = CH_WORKING;
 					}
 					debug_bulk_print("mixer[%d]: ampleft=%.1f ampright=%.1f\n", i, input->ampfactor * input->ampl, input->ampfactor * input->ampr);
-					/* left channel */
-					if(mix_waveforms(channel->waveout, input->wavein, input->ampfactor * input->ampl, WAVE_BATCH))
+					if(is_input_active(input->wavein, WAVE_BATCH)) {
 						channel->axcindicate = '*';
-					/* right channel */
-					if(channel->mode == MM_STEREO) {
-						if(mix_waveforms(channel->waveout_r, input->wavein, input->ampfactor * input->ampr, WAVE_BATCH))
-							channel->axcindicate = '*';
+						if(input->priority == true && only_priority_output == false) {
+							only_priority_output = true;
+							printf("priority_out\n");
+							memset(channel->freqlist[0].label, 0, 32);
+							memset(channel->waveout, 0, WAVE_BATCH * sizeof(float));
+							if(channel->mode == MM_STEREO)
+								memset(channel->waveout_r, 0, WAVE_BATCH * sizeof(float));
+						}
+
+						debug_bulk_print("i: %d, j: %d, prio: %d, only: %d\n", i, j, (int)input->priority, (int)only_priority_output);
+						printf("i: %d, j: %d, prio: %d, only: %d\n", i, j, (int)input->priority, (int)only_priority_output);
+						if((input->priority == true && only_priority_output == true)
+						    || (input->priority == false && only_priority_output == false)) {
+							mix_shortnames(channel->freqlist[0].label, input->shortname);
+							/* left channel */
+							mix_waveforms(channel->waveout, input->wavein, input->ampfactor * input->ampl, WAVE_BATCH);
+							/* right channel */
+							if(channel->mode == MM_STEREO) {
+								mix_waveforms(channel->waveout_r, input->wavein, input->ampfactor * input->ampr, WAVE_BATCH);
+							}
+						}
 					}
 					input->ready = false;
 					RESET_BIT(mixer->inputs_todo, j);
@@ -182,14 +218,14 @@ void *mixer_thread(void *params) {
 			}
 
 			if((mixer->inputs_todo & mixer->input_mask) == 0 || mixer->interval == 0) {	// all good inputs handled or last interval passed
-		        if(DEBUG) {
-		            gettimeofday(&te, NULL);
-		            debug_bulk_print("mixerinput: %lu.%lu %lu int=%d inp_unhandled=0x%02x inp_mask=0x%02x\n",
+						if(DEBUG) {
+								gettimeofday(&te, NULL);
+								debug_bulk_print("mixerinput: %lu.%lu %lu int=%d inp_unhandled=0x%02x inp_mask=0x%02x\n",
 						te.tv_sec, te.tv_usec, (te.tv_sec - ts.tv_sec) * 1000000UL + te.tv_usec - ts.tv_usec,
 						mixer->interval, mixer->inputs_todo, mixer->input_mask);
-		            ts.tv_sec = te.tv_sec;
-	        	    ts.tv_usec = te.tv_usec;
-			    }
+								ts.tv_sec = te.tv_sec;
+								ts.tv_usec = te.tv_usec;
+				}
 				channel->state = CH_READY;
 				safe_cond_signal(&mp3_cond, &mp3_mutex);
 				mixer->interval = MIX_DIVISOR;
